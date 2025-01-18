@@ -9,6 +9,7 @@
 #include <AzCore/PlatformIncl.h>
 #include <AzCore/Module/Environment.h>
 #include <AzFramework/Input/Devices/Mouse/InputDeviceMouse.h>
+#include <AzFramework/Input/Devices/Mouse/InputDeviceMouse_Windows.h>
 #include <AzFramework/Input/Buses/Notifications/RawInputNotificationBus_Platform.h>
 #include <AzFramework/Input/Buses/Requests/InputSystemCursorRequestBus.h>
 
@@ -37,97 +38,6 @@ namespace
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 namespace AzFramework
 {
-    ////////////////////////////////////////////////////////////////////////////////////////////////
-    //! Platform specific implementation for Windows mouse input devices
-    class InputDeviceMouseWindows : public InputDeviceMouse::Implementation
-                                  , public RawInputNotificationBusWindows::Handler
-    {
-        ////////////////////////////////////////////////////////////////////////////////////////////
-        //! Count of the number instances of this class that have been created
-        static AZ::EnvironmentVariable<int> s_instanceCount;
-
-    public:
-        ////////////////////////////////////////////////////////////////////////////////////////////
-        // Allocator
-        AZ_CLASS_ALLOCATOR(InputDeviceMouseWindows, AZ::SystemAllocator);
-
-        ////////////////////////////////////////////////////////////////////////////////////////////
-        //! Constructor
-        //! \param[in] inputDevice Reference to the input device being implemented
-        InputDeviceMouseWindows(InputDeviceMouse& inputDevice);
-
-        ////////////////////////////////////////////////////////////////////////////////////////////
-        //! Destructor
-        ~InputDeviceMouseWindows() override;
-
-    private:
-        ////////////////////////////////////////////////////////////////////////////////////////////
-        //! \ref AzFramework::InputDeviceMouse::Implementation::IsConnected
-        bool IsConnected() const override;
-
-        ////////////////////////////////////////////////////////////////////////////////////////////
-        //! \ref AzFramework::InputDeviceMouse::Implementation::SetSystemCursorState
-        void SetSystemCursorState(SystemCursorState systemCursorState) override;
-
-        ////////////////////////////////////////////////////////////////////////////////////////////
-        //! \ref AzFramework::InputDeviceMouse::Implementation::GetSystemCursorState
-        SystemCursorState GetSystemCursorState() const override;
-
-        ////////////////////////////////////////////////////////////////////////////////////////////
-        //! \ref AzFramework::InputDeviceMouse::Implementation::SetSystemCursorPositionNormalized
-        void SetSystemCursorPositionNormalized(AZ::Vector2 positionNormalized) override;
-
-        ////////////////////////////////////////////////////////////////////////////////////////////
-        //! \ref AzFramework::InputDeviceMouse::Implementation::GetSystemCursorPositionNormalized
-        AZ::Vector2 GetSystemCursorPositionNormalized() const override;
-
-        ////////////////////////////////////////////////////////////////////////////////////////////
-        //! \ref AzFramework::InputDeviceMouse::Implementation::TickInputDevice
-        void TickInputDevice() override;
-
-        ////////////////////////////////////////////////////////////////////////////////////////////
-        //! \ref AzFramework::RawInputNotificationsWindows::OnRawInputEvent
-        void OnRawInputEvent(const RAWINPUT& rawInput) override;
-
-        ////////////////////////////////////////////////////////////////////////////////////////////
-        //! Refresh system cursor clipping constraint
-        void RefreshSystemCursorClippingConstraint();
-
-        ////////////////////////////////////////////////////////////////////////////////////////////
-        //! Refresh system cursor viibility
-        void RefreshSystemCursorVisibility();
-
-        //! Return the size of the client window constrained to the desktop work area.
-        RECT GetConstrainedClientRect(HWND focusWindow) const;
-
-        ////////////////////////////////////////////////////////////////////////////////////////////
-        //! The current system cursor state
-        SystemCursorState m_systemCursorState;
-
-        ////////////////////////////////////////////////////////////////////////////////////////////
-        //! Does the window attached to the input (main) thread's message queue have focus?
-        // https://msdn.microsoft.com/en-us/library/windows/desktop/ms646294(v=vs.85).aspx
-        bool m_hasFocus;
-
-        ////////////////////////////////////////////////////////////////////////////////////////////
-        //! The client rect of the window obtained the last time this input device was ticked.
-        RECT m_lastClientRect;
-
-        //! The flags sent with the last received MOUSE_MOVE_RELATIVE or MOUSE_MOVE_ABSOLUTE event.
-        USHORT m_lastMouseMoveEventFlags;
-
-        ////////////////////////////////////////////////////////////////////////////////////////////
-        //! The last absolute mouse position, reported by a MOUSE_MOVE_ABSOLUTE raw input API event,
-        //! which will more than likely only ever be received when running a remote desktop session.
-        AZ::Vector2 m_lastMouseMoveEventAbsolutePosition;
-    };
-
-    ////////////////////////////////////////////////////////////////////////////////////////////////
-    InputDeviceMouse::Implementation* InputDeviceMouse::Implementation::Create(InputDeviceMouse& inputDevice)
-    {
-        return aznew InputDeviceMouseWindows(inputDevice);
-    }
-
     ////////////////////////////////////////////////////////////////////////////////////////////////
     AZ::EnvironmentVariable<int> InputDeviceMouseWindows::s_instanceCount = nullptr;
 
@@ -221,7 +131,7 @@ namespace AzFramework
     ////////////////////////////////////////////////////////////////////////////////////////////////
     void InputDeviceMouseWindows::SetSystemCursorState(SystemCursorState systemCursorState)
     {
-        if (systemCursorState != m_systemCursorState)
+        if (m_captureCursor && systemCursorState != m_systemCursorState)
         {
             m_systemCursorState = systemCursorState;
             RefreshSystemCursorClippingConstraint();
@@ -273,6 +183,13 @@ namespace AzFramework
 
         // Get the content (client) rect of the focus window
         RECT clientRect = GetConstrainedClientRect(focusWindow);
+
+        // If the window is 0-sized in at least one dimension, just return a cursor position of (0, 0).
+        // This can happen when a window gets hidden by pressing Windows-D to go to the desktop.
+        if ((clientRect.left == clientRect.right) || (clientRect.top == clientRect.bottom))
+        {
+            return AZ::Vector2(0.0f, 0.0f);
+        }
 
         // Normalize the cursor position relative to the content (client rect) of the focus window
         const float clientRectWidth = static_cast<float>(clientRect.right - clientRect.left);
@@ -472,15 +389,12 @@ namespace AzFramework
         ::ClientToScreen(focusWindow, (LPPOINT)&clientRect.left); // Converts the top-left point
         ::ClientToScreen(focusWindow, (LPPOINT)&clientRect.right); // Converts the bottom-right point
 
-        // Get the desktop "work area" (i.e. area not including system taskbar) in screen coordinates
-        RECT workRect;
-        ::SystemParametersInfoW(SPI_GETWORKAREA, 0, &workRect, 0);
-
-        // Clip the client rect to the desktop work area
-        clientRect.left = AZStd::max(clientRect.left, workRect.left);
-        clientRect.right = AZStd::min(clientRect.right, workRect.right);
-        clientRect.top = AZStd::max(clientRect.top, workRect.top);
-        clientRect.bottom = AZStd::min(clientRect.bottom, workRect.bottom);
+        // Note that this returns a rectangle that could overlap other things like the system taskbar.
+        // We're making the assumption that the implementation of NativeWindow is drawing the window above everything,
+        // including the taskbar, so that any mouse movements and clicks within the window won't be able to change focus
+        // to the taskbar, popup email notifications, etc. If NativeWindow *doesn't* draw the window above everything,
+        // then the way we handle hidden contrained mouse inputs will need to change to ensure that it doesn't accidentally
+        // send clicks and movements to overlapping windows of higher priority.
 
         return clientRect;
     }

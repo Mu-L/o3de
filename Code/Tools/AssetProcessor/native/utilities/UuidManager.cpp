@@ -214,6 +214,11 @@ namespace AssetProcessor
         return m_enabledTypes.contains(file.Extension().Native());
     }
 
+    AZStd::unordered_set<AZStd::string> UuidManager::GetEnabledTypes()
+    {
+        return m_enabledTypes;
+    }
+
     void UuidManager::EnableGenerationForTypes(AZStd::unordered_set<AZStd::string> types)
     {
         m_enabledTypes = AZStd::move(types);
@@ -268,7 +273,11 @@ namespace AssetProcessor
             {
                 QString parentPath = QString::fromStdString(AZStd::string(metadataFilePath.ParentPath().Native()).c_str());
                 QString caseCorrectedMetadataRelPath = QString::fromStdString(AZStd::string(metadataFilePath.Filename().Native()).c_str());
-                metadataFileExists = AssetUtilities::UpdateToCorrectCase(parentPath, caseCorrectedMetadataRelPath);
+
+                // in this case, we got the file name and path from a real existing file that has already got the correct case
+                // so the only case correction we may need to do is for the last part (the meta file name)
+                // so we can set the checkEntirePath param to false.
+                metadataFileExists = AssetUtilities::UpdateToCorrectCase(parentPath, caseCorrectedMetadataRelPath, false);
 
                 if (metadataFileExists)
                 {

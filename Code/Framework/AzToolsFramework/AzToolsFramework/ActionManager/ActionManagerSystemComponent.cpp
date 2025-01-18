@@ -123,7 +123,7 @@ namespace AzToolsFramework
         // The ActionManagerSystemComponent could be created in a tooling context
         // where a QGuiApplication does not exist such as the SerializeContextTools
         auto qAppInstance = QApplication::instance();
-        if (IsNewActionManagerEnabled() && qAppInstance != nullptr)
+        if (qAppInstance != nullptr)
         {
             m_defaultParentObject = new QWidget();
 
@@ -131,6 +131,8 @@ namespace AzToolsFramework
             m_hotKeyManager = AZStd::make_unique<HotKeyManager>();
             m_menuManager = AZStd::make_unique<MenuManager>(m_defaultParentObject);
             m_toolBarManager = AZStd::make_unique<ToolBarManager>(m_defaultParentObject);
+
+            m_hotKeyWidgetRegistrationHelper = AZStd::make_unique<HotKeyWidgetRegistrationHelper>();
         }
     }
 

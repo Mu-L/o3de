@@ -10,7 +10,7 @@
 #include <Atom/RPI.Public/RPIUtils.h>
 #include <Atom/RPI.Public/Shader/ShaderResourceGroup.h>
 #include <Atom/RPI.Public/Shader/ShaderSystemInterface.h>
-#include <Atom/RPI.Public/Scene.h> 
+#include <Atom/RPI.Public/Scene.h>
 #include <Atom/RPI.Reflect/Material/MaterialFunctor.h>
 #include <Atom/RHI/DrawPacketBuilder.h>
 #include <Atom/RHI/RHISystemInterface.h>
@@ -18,7 +18,7 @@
 #include <Atom/RPI.Public/Shader/ShaderReloadDebugTracker.h>
 
 namespace AZ
-{   
+{
     namespace RPI
     {
         AZ_CVAR(bool,
@@ -55,7 +55,7 @@ namespace AZ
         {
             return m_material;
         }
-        
+
         const ModelLod::Mesh& MeshDrawPacket::GetMesh() const
         {
             AZ_Assert(m_modelLodMeshIndex < m_modelLod->GetMeshes().size(), "m_modelLodMeshIndex %zu is out of range %zu", m_modelLodMeshIndex, m_modelLod->GetMeshes().size());
@@ -127,7 +127,7 @@ namespace AZ
                     return false; // stop checking other shader items.
                 }
             );
-            
+
             m_needUpdate = true;
             return true;
         }
@@ -182,6 +182,20 @@ namespace AZ
 
         bool MeshDrawPacket::Update(const Scene& parentScene, bool forceUpdate /*= false*/)
         {
+            // Setup the Shader variant handler when update this MeshDrawPacket the first time .
+            // This is because the MeshDrawPacket data can be copied or moved right after it's created.
+            // The m_shaderVariantHandler won't be copied correctly due to the capture of 'this' pointer.
+            // Instead of override all the copy and move operators, this might be a better solution.
+            if (!m_shaderVariantHandler.IsConnected())
+            {
+                m_shaderVariantHandler = Material::OnMaterialShaderVariantReadyEvent::Handler(
+                    [this]()
+                    {
+                        this->m_needUpdate = true;
+                    });
+                m_material->ConnectEvent(m_shaderVariantHandler);
+            }
+
             // Why we need to check "!m_material->NeedsCompile()"...
             //    Frame A:
             //      - Material::SetPropertyValue("foo",...). This bumps the material's CurrentChangeId()
@@ -202,29 +216,51 @@ namespace AZ
                 DoUpdate(parentScene);
                 m_materialChangeId = m_material->GetCurrentChangeId();
                 m_needUpdate = false;
+
+                DebugOutputShaderVariants();
                 return true;
             }
 
             return false;
         }
 
+        static bool HasRootConstants(const RHI::ConstantsLayout* rootConstantsLayout)
+        {
+            return rootConstantsLayout && rootConstantsLayout->GetDataSize() > 0;
+        }
+
+        void MeshDrawPacket::DebugOutputShaderVariants()
+        {
+#ifdef DEBUG_MESH_SHADERVARIANTS
+            uint32_t index = 0;
+
+            AZ::Data::AssetInfo assetInfo;
+            AZ::Data::AssetCatalogRequestBus::BroadcastResult(assetInfo, &AZ::Data::AssetCatalogRequestBus::Events::GetAssetInfoById, m_modelLod->GetAssetId());
+
+            AZ_TracePrintf("MeshDrawPacket", "Mesh: %s", assetInfo.m_relativePath.data());
+            for (const auto& variant : m_shaderVariantNames)
+            {
+                AZ_TracePrintf("MeshDrawPacket", "%d: %s", index++, variant.data());
+            }
+#endif
+        }
+
         bool MeshDrawPacket::DoUpdate(const Scene& parentScene)
         {
-            const ModelLod::Mesh& mesh = m_modelLod->GetMeshes()[m_modelLodMeshIndex];
+            auto meshes = m_modelLod->GetMeshes();
+            ModelLod::Mesh& mesh = meshes[m_modelLodMeshIndex];
 
             if (!m_material)
             {
                 AZ_Warning("MeshDrawPacket", false, "No material provided for mesh. Skipping.");
                 return false;
             }
-            
+
             ShaderReloadDebugTracker::ScopedSection reloadSection("MeshDrawPacket::DoUpdate");
 
-            RHI::DrawPacketBuilder drawPacketBuilder;
+            RHI::DrawPacketBuilder drawPacketBuilder{RHI::MultiDevice::AllDevices};
             drawPacketBuilder.Begin(nullptr);
-
-            drawPacketBuilder.SetDrawArguments(mesh.m_drawArguments);
-            drawPacketBuilder.SetIndexBufferView(mesh.m_indexBufferView);
+            drawPacketBuilder.SetGeometryView(&mesh);
             drawPacketBuilder.AddShaderResourceGroup(m_objectSrg->GetRHIShaderResourceGroup());
             drawPacketBuilder.AddShaderResourceGroup(m_material->GetRHIShaderResourceGroup());
 
@@ -233,12 +269,17 @@ namespace AZ
             MeshDrawPacket::ShaderList shaderList;
             shaderList.reserve(m_activeShaders.size());
 
-            // We have to keep a list of these outside the loops that collect all the shaders because the DrawPacketBuilder
-            // keeps pointers to StreamBufferViews until DrawPacketBuilder::End() is called. And we use a fixed_vector to guarantee
-            // that the memory won't be relocated when new entries are added.
-            AZStd::fixed_vector<ModelLod::StreamBufferViewList, RHI::DrawPacketBuilder::DrawItemCountMax> streamBufferViewsPerShader;
+            // The root constants are shared by all draw items in the draw packet. We must populate them with default values.
+            // The draw packet builder needs to know where the data is coming from during appendShader, but it's not actually read
+            // until drawPacketBuilder.End(), so store the default data out here.
+            AZStd::vector<uint8_t> rootConstants;
+            bool isFirstShaderItem = true;
 
             m_perDrawSrgs.clear();
+
+#ifdef DEBUG_MESH_SHADERVARIANTS
+            m_shaderVariantNames.clear();
+#endif
 
             auto appendShader = [&](const ShaderCollection::Item& shaderItem, const Name& materialPipelineName)
             {
@@ -275,7 +316,8 @@ namespace AZ
                     return false;
                 }
 
-                if (!parentScene.HasOutputForPipelineState(drawListTag))
+                const bool isRasterShader = (shaderItem.GetShaderAsset()->GetPipelineStateType() == RHI::PipelineStateType::Draw);
+                if (isRasterShader && !parentScene.HasOutputForPipelineState(drawListTag))
                 {
                     // drawListTag not found in this scene, so don't render this item
                     return false;
@@ -296,13 +338,17 @@ namespace AZ
                 // This might not be necessary anymore though, since ShaderAsset::GetDefaultShaderOptions() does this when the material type builder is creating the ShaderCollection.
                 shaderOptions.SetUnspecifiedToDefaultValues();
 
-                // [GFX_TODO][ATOM-14476]: according to this usage, we should make the shader input contract uniform across all shader variants.
-                m_modelLod->CheckOptionalStreams(
-                    shaderOptions,
-                    shader->GetInputContract(),
-                    m_modelLodMeshIndex,
-                    m_materialModelUvMap,
-                    m_material->GetAsset()->GetMaterialTypeAsset()->GetUvNameMap());
+                if (isRasterShader)
+                {
+                    // [GFX_TODO][ATOM-14476]: according to this usage, we should make the shader input contract uniform across all shader
+                    // variants.
+                    m_modelLod->CheckOptionalStreams(
+                        shaderOptions,
+                        shader->GetInputContract(),
+                        m_modelLodMeshIndex,
+                        m_materialModelUvMap,
+                        m_material->GetAsset()->GetMaterialTypeAsset()->GetUvNameMap());
+                }
 
                 // apply shader options from this draw packet to the ShaderItem
                 for (auto& meshShaderOption : m_shaderOptions)
@@ -311,6 +357,9 @@ namespace AZ
                     RPI::ShaderOptionValue& value = meshShaderOption.second;
 
                     ShaderOptionIndex index = shaderOptions.FindShaderOptionIndex(name);
+
+                    // Shader options will be applied to any shader item that supports it, even if
+                    // not all the shader items in the draw packet support it
                     if (index.IsValid())
                     {
                         shaderOptions.SetValue(name, value);
@@ -320,28 +369,44 @@ namespace AZ
                 const ShaderVariantId requestedVariantId = shaderOptions.GetShaderVariantId();
                 const ShaderVariant& variant = r_forceRootShaderVariantUsage ? shader->GetRootVariant() : shader->GetVariant(requestedVariantId);
 
-                RHI::PipelineStateDescriptorForDraw pipelineStateDescriptor;
-                variant.ConfigurePipelineState(pipelineStateDescriptor);
-
-                // Render states need to merge the runtime variation.
-                // This allows materials to customize the render states that the shader uses.
-                const RHI::RenderStates& renderStatesOverlay = *shaderItem.GetRenderStatesOverlay();
-                RHI::MergeStateInto(renderStatesOverlay, pipelineStateDescriptor.m_renderStates);
-
-                auto& streamBufferViews = streamBufferViewsPerShader.emplace_back();
+#ifdef DEBUG_MESH_SHADERVARIANTS
+                m_shaderVariantNames.push_back(variant.GetShaderVariantAsset().GetHint());
+#endif
 
                 UvStreamTangentBitmask uvStreamTangentBitmask;
+                RHI::StreamBufferIndices streamIndices;
+                RHI::PipelineStateDescriptorForDraw pipelineStateDescriptorDraw;
 
-                if (!m_modelLod->GetStreamsForMesh(
-                    pipelineStateDescriptor.m_inputStreamLayout,
-                    streamBufferViews,
-                    &uvStreamTangentBitmask,
-                    shader->GetInputContract(),
-                    m_modelLodMeshIndex,
-                    m_materialModelUvMap,
-                    m_material->GetAsset()->GetMaterialTypeAsset()->GetUvNameMap()))
+                RHI::PipelineStateDescriptorForDispatch pipelineStateDescriptorDispatch;
+
+                RHI::PipelineStateDescriptor* pipelineStateDescriptor = nullptr;
+                if (isRasterShader)
                 {
-                    return false;
+                    variant.ConfigurePipelineState(pipelineStateDescriptorDraw, shaderOptions);
+                    pipelineStateDescriptor = &pipelineStateDescriptorDraw;
+
+                    // Render states need to merge the runtime variation.
+                    // This allows materials to customize the render states that the shader uses.
+                    const RHI::RenderStates& renderStatesOverlay = *shaderItem.GetRenderStatesOverlay();
+                    RHI::MergeStateInto(renderStatesOverlay, pipelineStateDescriptorDraw.m_renderStates);
+
+                    if (!m_modelLod->GetStreamsForMesh(
+                            pipelineStateDescriptorDraw.m_inputStreamLayout,
+                            streamIndices,
+                            &uvStreamTangentBitmask,
+                            shader->GetInputContract(),
+                            m_modelLodMeshIndex,
+                            m_materialModelUvMap,
+                            m_material->GetAsset()->GetMaterialTypeAsset()->GetUvNameMap()))
+                    {
+                        return false;
+                    }
+                    parentScene.ConfigurePipelineState(drawListTag, pipelineStateDescriptorDraw);
+                }
+                else
+                {
+                    variant.ConfigurePipelineState(pipelineStateDescriptorDispatch, shaderOptions);
+                    pipelineStateDescriptor = &pipelineStateDescriptorDispatch;
                 }
 
                 Data::Instance<ShaderResourceGroup> drawSrg = shader->CreateDrawSrgForShaderVariant(shaderOptions, false);
@@ -358,42 +423,49 @@ namespace AZ
                     }
 
                     drawSrg->Compile();
-                }
+                };
 
-                parentScene.ConfigurePipelineState(drawListTag, pipelineStateDescriptor);
-
-                const RHI::PipelineState* pipelineState = shader->AcquirePipelineState(pipelineStateDescriptor);
+                const RHI::PipelineState* pipelineState = shader->AcquirePipelineState(*pipelineStateDescriptor);
                 if (!pipelineState)
                 {
                     AZ_Error("MeshDrawPacket", false, "Shader '%s'. Failed to acquire default pipeline state", shaderItem.GetShaderAsset()->GetName().GetCStr());
                     return false;
                 }
 
-                if(!m_rootConstantsLayout)
+                const RHI::ConstantsLayout* rootConstantsLayout =
+                    pipelineStateDescriptor->m_pipelineLayoutDescriptor->GetRootConstantsLayout();
+                if(isFirstShaderItem)
                 {
-                    const RHI::ConstantsLayout* rootConstantsLayout = pipelineStateDescriptor.m_pipelineLayoutDescriptor->GetRootConstantsLayout();
-                    if (rootConstantsLayout && rootConstantsLayout->GetDataSize() > 0)
+                    if (HasRootConstants(rootConstantsLayout))
                     {
                         m_rootConstantsLayout = rootConstantsLayout;
-                        AZStd::vector<uint8_t> constants(m_rootConstantsLayout->GetDataSize());
-                        drawPacketBuilder.SetRootConstants(constants);
+                        rootConstants.resize(m_rootConstantsLayout->GetDataSize());
+                        drawPacketBuilder.SetRootConstants(rootConstants);
                     }
+
+                    isFirstShaderItem = false;
                 }
                 else
                 {
                     AZ_Error(
                         "MeshDrawPacket",
-                        m_rootConstantsLayout->GetHash() ==
-                            pipelineStateDescriptor.m_pipelineLayoutDescriptor->GetRootConstantsLayout()->GetHash(),
+                        (!m_rootConstantsLayout && !HasRootConstants(rootConstantsLayout)) ||
+                        (m_rootConstantsLayout && rootConstantsLayout && m_rootConstantsLayout->GetHash() == rootConstantsLayout->GetHash()),
+                        "Shader %s has mis-matched root constant layout in material %s. "
                         "All draw items in a draw packet need to share the same root constants layout. This means that each pass "
-                        "(e.g. Depth, Shadows, Forward, MotionVectors) for a given materialtype should use the same layout.");
+                        "(e.g. Depth, Shadows, Forward, MotionVectors) for a given materialtype should use the same layout.",
+                        shaderItem.GetShaderAsset()->GetName().GetCStr(),
+                        m_material->GetAsset().ToString<AZStd::string>().c_str());
                 }
 
                 RHI::DrawPacketBuilder::DrawRequest drawRequest;
                 drawRequest.m_listTag = drawListTag;
                 drawRequest.m_pipelineState = pipelineState;
-                drawRequest.m_streamBufferViews = streamBufferViews;
-                drawRequest.m_stencilRef = m_stencilRef;
+                if (isRasterShader)
+                {
+                    drawRequest.m_streamIndices = streamIndices;
+                    drawRequest.m_stencilRef = m_stencilRef;
+                }
                 drawRequest.m_sortKey = m_sortKey;
                 if (drawSrg)
                 {
@@ -410,7 +482,7 @@ namespace AZ
                 }
 
                 drawPacketBuilder.AddDrawItem(drawRequest);
-                
+
                 ShaderData shaderData;
                 shaderData.m_shader = AZStd::move(shader);
                 shaderData.m_materialPipelineName = materialPipelineName;
@@ -421,7 +493,7 @@ namespace AZ
                 shaderList.emplace_back(AZStd::move(shaderData));
 
                 return true;
-            };
+            }; // appendShader
 
             m_material->ApplyGlobalShaderOptions();
 
@@ -457,14 +529,10 @@ namespace AZ
             }
         }
 
-        const RHI::DrawPacket* MeshDrawPacket::GetRHIDrawPacket() const
-        {
-            return m_drawPacket.get();
-        }
-
         const RHI::ConstPtr<RHI::ConstantsLayout> MeshDrawPacket::GetRootConstantsLayout() const
         {
             return m_rootConstantsLayout;
         }
     } // namespace RPI
 } // namespace AZ
+

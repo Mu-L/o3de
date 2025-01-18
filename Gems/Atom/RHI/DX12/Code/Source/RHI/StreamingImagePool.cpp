@@ -102,7 +102,7 @@ namespace AZ
                 }
             }
 
-            void OnResourceShutdown(const RHI::Resource& resource) override
+            void OnResourceShutdown(const RHI::DeviceResource& resource) override
             {
                 const Image& image = static_cast<const Image&>(resource);
                 if (!image.m_pendingResolves)
@@ -218,27 +218,14 @@ namespace AZ
             bool canAllocate = memoryAllocatorUsage.CanAllocate(pageAllocationInBytes);
             if (!canAllocate && m_memoryReleaseCallback)
             {
-                bool releaseSuccess = false;
-                while (!canAllocate)
-                {
-                    // Request to release some memory
-                    releaseSuccess = m_memoryReleaseCallback();
-
-                    // break out of the loop if memory release did not happen
-                    if (!releaseSuccess)
-                    {
-                        break;
-                    }
-
-                    // re-evaluation page memory allocation since there are tiles were released.
-                    pageAllocationInBytes = m_tileAllocator.EvaluateMemoryAllocation(totalTiles);
-                    canAllocate = memoryAllocatorUsage.CanAllocate(pageAllocationInBytes);
-                }
+                // only try to release tiles the resource need
+                uint32_t maxUsedTiles = m_tileAllocator.GetTotalTileCount() - totalTiles;
+                bool releaseSuccess = m_memoryReleaseCallback(maxUsedTiles * m_tileAllocator.GetDescriptor().m_tileSizeInBytes);
 
                 if (!releaseSuccess)
                 {
-                    AZ_Warning("DX12::StreamingImagePool", false, "There isn't enough memory to allocate the image subresource. "
-                        "Using the default tile for the subresource. Try increase the StreamingImagePool memory budget");
+                    AZ_Warning("DX12::StreamingImagePool", false, "There isn't enough memory to allocate the image [%s]'s subresource %d. "
+                        "Using the default tile for the subresource. Try increase the StreamingImagePool memory budget", image.GetName().GetCStr(), subresourceIndex);
                 }
             }
 
@@ -452,11 +439,13 @@ namespace AZ
                 if (imageDescriptor.m_arraySize > 1)
                 {
                     // get smallest mip size
-                    uint32_t formatDiemensionAlignment = RHI::GetFormatDimensionAlignment(imageDescriptor.m_format);
+                    RHI::Size formatDimensionAlignment = RHI::GetFormatDimensionAlignment(imageDescriptor.m_format);
                     uint32_t minMipWidth = AZStd::max(imageDescriptor.m_size.m_width >> (imageDescriptor.m_mipLevels-1), 1u);
                     uint32_t minMipHeight = AZStd::max(imageDescriptor.m_size.m_height >> (imageDescriptor.m_mipLevels-1), 1u);
-                    uint32_t minMipSize = AZ::DivideAndRoundUp(minMipWidth, formatDiemensionAlignment) * AZ::DivideAndRoundUp(minMipHeight, formatDiemensionAlignment)
-                        * RHI::GetFormatSize(imageDescriptor.m_format);
+                    uint32_t minMipSize =
+                        AZ::DivideAndRoundUp(minMipWidth, formatDimensionAlignment.m_width) *
+                        AZ::DivideAndRoundUp(minMipHeight, formatDimensionAlignment.m_height) *
+                        RHI::GetFormatSize(imageDescriptor.m_format);
                     if (minMipSize < TileSizeInBytes)
                     {
                         return false;
@@ -468,7 +457,7 @@ namespace AZ
             return false;
         }
 
-        RHI::ResultCode StreamingImagePool::InitImageInternal(const RHI::StreamingImageInitRequest& request)
+        RHI::ResultCode StreamingImagePool::InitImageInternal(const RHI::DeviceStreamingImageInitRequest& request)
         {
             AZ_PROFILE_FUNCTION(RHI);
 
@@ -498,30 +487,6 @@ namespace AZ
                 GetDevice().GetImageAllocationInfo(request.m_descriptor, allocationInfo);
 
                 auto& memoryAllocatorUsage = GetDeviceHeapMemoryUsage();
-                
-                bool canAllocate = memoryAllocatorUsage.CanAllocate(allocationInfo.SizeInBytes);
-                if (!canAllocate && m_memoryReleaseCallback)
-                {
-                    bool releaseSuccess = false;
-                    while (!canAllocate)
-                    {
-                        releaseSuccess = m_memoryReleaseCallback();
-                        if (!releaseSuccess)
-                        {
-                            AZ_Warning("DX12::StreamingImagePool", false, "Failed to release any memory from the StreamngImagePool");
-                            break;
-                        }
-                        // Re-evaluation the allocation after some memory got release
-                        canAllocate = memoryAllocatorUsage.CanAllocate(allocationInfo.SizeInBytes);
-                    }
-                }
-
-                if (!canAllocate)
-                {
-                    // Can't resolve the memory issue.
-                    AZ_Error("DX12::StreamingImagePool", false, "StreamingImagePool doesn't have enough memory to allocate image. Try increase the StreamingImagePool's memory budget");
-                    return RHI::ResultCode::OutOfMemory;
-                }
 
                 memoryView = GetDevice().CreateImageCommitted(request.m_descriptor, nullptr, D3D12_RESOURCE_STATE_COMMON, D3D12_HEAP_TYPE_DEFAULT);
                 
@@ -562,8 +527,8 @@ namespace AZ
             image.m_minimumResidentSizeInBytes = image.m_residentSizeInBytes;
 
             // Queue upload tail mip slices
-            RHI::StreamingImageExpandRequest uploadMipRequest;
-            uploadMipRequest.m_image = &image;
+            RHI::DeviceStreamingImageExpandRequest uploadMipRequest;
+            uploadMipRequest.m_image = request.m_image;
             uploadMipRequest.m_mipSlices = request.m_tailMipSlices;
             uploadMipRequest.m_waitForUpload = true;
             GetDevice().GetAsyncUploadQueue().QueueUpload(uploadMipRequest, request.m_descriptor.m_mipLevels);
@@ -573,7 +538,7 @@ namespace AZ
             return RHI::ResultCode::Success;
         }
 
-        void StreamingImagePool::ShutdownResourceInternal(RHI::Resource& resourceBase)
+        void StreamingImagePool::ShutdownResourceInternal(RHI::DeviceResource& resourceBase)
         {
             Image& image = static_cast<Image&>(resourceBase);
 
@@ -611,7 +576,7 @@ namespace AZ
             image.m_pendingResolves = 0;
         }
 
-        RHI::ResultCode StreamingImagePool::ExpandImageInternal(const RHI::StreamingImageExpandRequest& request)
+        RHI::ResultCode StreamingImagePool::ExpandImageInternal(const RHI::DeviceStreamingImageExpandRequest& request)
         {
             Image& image = static_cast<Image&>(*request.m_image);
 
@@ -624,7 +589,7 @@ namespace AZ
             }
 
             // Create new expend request and append callback from the StreamingImagePool
-            RHI::StreamingImageExpandRequest newRequest = request;
+            RHI::DeviceStreamingImageExpandRequest newRequest = request;
             newRequest.m_completeCallback = [=]() 
             {
                 Image& dxImage = static_cast<Image&>(*request.m_image);
@@ -642,7 +607,7 @@ namespace AZ
             return RHI::ResultCode::Success;
         }
 
-        RHI::ResultCode StreamingImagePool::TrimImageInternal(RHI::Image& image, uint32_t targetMipLevel)
+        RHI::ResultCode StreamingImagePool::TrimImageInternal(RHI::DeviceImage& image, uint32_t targetMipLevel)
         {
             Image& imageImpl = static_cast<Image&>(image);
 
@@ -681,24 +646,17 @@ namespace AZ
                 return RHI::ResultCode::Success;
             }
 
-            // Can't set to new budget if the new budget is smaller than allocated and there is no memory release handling
-            if (newBudget < heapMemoryUsage.m_totalResidentInBytes && !m_memoryReleaseCallback)
-            {
-                AZ_Warning("StreamingImagePool", false, "Can't set pool memory budget to %u because the memory release callback wasn't set", newBudget);
-                return RHI::ResultCode::InvalidArgument;
-            }
-
             bool releaseSuccess = true;
-            while (newBudget < heapMemoryUsage.m_totalResidentInBytes && releaseSuccess)
+            // If the new budget is smaller than the memory are in use, we need to release some memory
+            if (newBudget < heapMemoryUsage.m_usedResidentInBytes)
             {
-                // Request to release some memory
-                releaseSuccess = m_memoryReleaseCallback();
+                releaseSuccess = m_memoryReleaseCallback(newBudget);
             }
 
-            // Failed to release memory to desired budget. Set current budget to current total resident.
+            size_t resident = heapMemoryUsage.m_usedResidentInBytes;
             if (!releaseSuccess)
             {
-                heapMemoryUsage.m_budgetInBytes = heapMemoryUsage.m_totalResidentInBytes;
+                heapMemoryUsage.m_budgetInBytes = resident;
                 AZ_Warning("StreamingImagePool", false, "Failed to set pool memory budget to %u, set to %u instead", newBudget, heapMemoryUsage.m_budgetInBytes);
             }
             else

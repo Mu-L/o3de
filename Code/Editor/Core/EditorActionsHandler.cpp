@@ -8,8 +8,6 @@
 
 #include <Core/EditorActionsHandler.h>
 
-#include <AzFramework/API/ApplicationAPI.h>
-
 #include <AzToolsFramework/ActionManager/Action/ActionManagerInterface.h>
 #include <AzToolsFramework/ActionManager/Action/ActionManagerInternalInterface.h>
 #include <AzToolsFramework/ActionManager/HotKey/HotKeyManagerInterface.h>
@@ -48,6 +46,7 @@
 
 #include <QDesktopServices>
 #include <QDir>
+#include <QHBoxLayout>
 #include <QLabel>
 #include <QMainWindow>
 #include <QMenu>
@@ -235,15 +234,6 @@ void EditorActionsHandler::OnActionUpdaterRegistrationHook()
     m_actionManagerInterface->RegisterActionUpdater(EditorIdentifiers::RecentFilesChangedUpdaterIdentifier);
     m_actionManagerInterface->RegisterActionUpdater(EditorIdentifiers::UndoRedoUpdaterIdentifier);
     m_actionManagerInterface->RegisterActionUpdater(EditorIdentifiers::ViewportDisplayInfoStateChangedUpdaterIdentifier);
-
-    // If the Prefab system is not enabled, have a backup to update actions based on level loading.
-    AzFramework::ApplicationRequests::Bus::BroadcastResult(
-        m_isPrefabSystemEnabled, &AzFramework::ApplicationRequests::IsPrefabSystemEnabled);
-
-    if (!m_isPrefabSystemEnabled)
-    {
-        m_actionManagerInterface->RegisterActionUpdater(EditorIdentifiers::LevelLoadedUpdaterIdentifier);
-    }
 }
 
 void EditorActionsHandler::OnActionRegistrationHook()
@@ -570,8 +560,8 @@ void EditorActionsHandler::OnActionRegistrationHook()
     {
         AzToolsFramework::ActionProperties actionProperties;
         actionProperties.m_name = "Exit";
-        actionProperties.m_description = "Open a different project in the Project Manager.";
-        actionProperties.m_category = "Project";
+        actionProperties.m_description = "Exit the Editor";
+        actionProperties.m_category = "Editor";
 
         m_actionManagerInterface->RegisterAction(
             EditorIdentifiers::MainWindowActionContextIdentifier,
@@ -969,55 +959,6 @@ void EditorActionsHandler::OnActionRegistrationHook()
         m_actionManagerInterface->InstallEnabledStateCallback(actionIdentifier, IsLevelLoaded);
         m_actionManagerInterface->AddActionToUpdater(EditorIdentifiers::LevelLoadedUpdaterIdentifier, actionIdentifier);
         m_actionManagerInterface->AddActionToUpdater(EditorIdentifiers::GameModeStateChangedUpdaterIdentifier, actionIdentifier);
-
-        // This action is only accessible outside of Component Modes
-        m_actionManagerInterface->AssignModeToAction(AzToolsFramework::DefaultActionContextModeIdentifier, actionIdentifier);
-    }
-
-    // Export Selected Objects
-    {
-        constexpr AZStd::string_view actionIdentifier = "o3de.action.game.exportSelectedObjects";
-        AzToolsFramework::ActionProperties actionProperties;
-        actionProperties.m_name = "Export Selected Objects";
-        actionProperties.m_description = "Export Selected Objects.";
-        actionProperties.m_category = "Game";
-        actionProperties.m_menuVisibility = AzToolsFramework::ActionVisibility::AlwaysShow;
-
-        m_actionManagerInterface->RegisterAction(
-            EditorIdentifiers::MainWindowActionContextIdentifier,
-            actionIdentifier,
-            actionProperties,
-            [cryEdit = m_cryEditApp]
-            {
-                cryEdit->OnExportSelectedObjects();
-            }
-        );
-
-        m_actionManagerInterface->InstallEnabledStateCallback(actionIdentifier, AreEntitiesSelected);
-        m_actionManagerInterface->AddActionToUpdater(EditorIdentifiers::EntitySelectionChangedUpdaterIdentifier, actionIdentifier);
-
-        // This action is only accessible outside of Component Modes
-        m_actionManagerInterface->AssignModeToAction(AzToolsFramework::DefaultActionContextModeIdentifier, actionIdentifier);
-    }
-
-    // Export Occlusion Mesh
-    {
-        constexpr AZStd::string_view actionIdentifier = "o3de.action.game.exportOcclusionMesh";
-        AzToolsFramework::ActionProperties actionProperties;
-        actionProperties.m_name = "Export Occlusion Mesh";
-        actionProperties.m_description = "Export Occlusion Mesh.";
-        actionProperties.m_category = "Game";
-        actionProperties.m_menuVisibility = AzToolsFramework::ActionVisibility::AlwaysShow;
-
-        m_actionManagerInterface->RegisterAction(
-            EditorIdentifiers::MainWindowActionContextIdentifier,
-            actionIdentifier,
-            actionProperties,
-            [cryEdit = m_cryEditApp]
-            {
-                cryEdit->OnFileExportOcclusionMesh();
-            }
-        );
 
         // This action is only accessible outside of Component Modes
         m_actionManagerInterface->AssignModeToAction(AzToolsFramework::DefaultActionContextModeIdentifier, actionIdentifier);
@@ -1476,21 +1417,6 @@ void EditorActionsHandler::OnActionRegistrationHook()
         );
     }
 
-    // GameLift Documentation
-    {
-        AzToolsFramework::ActionProperties actionProperties;
-        actionProperties.m_name = "GameLift Documentation";
-        actionProperties.m_category = "Help";
-
-        m_actionManagerInterface->RegisterAction(
-            EditorIdentifiers::MainWindowActionContextIdentifier, "o3de.action.help.documentation.gamelift", actionProperties,
-            [cryEdit = m_cryEditApp]
-            {
-                cryEdit->OnDocumentationGamelift();
-            }
-        );
-    }
-
     // Release Notes
     {
         AzToolsFramework::ActionProperties actionProperties;
@@ -1532,21 +1458,6 @@ void EditorActionsHandler::OnActionRegistrationHook()
             [cryEdit = m_cryEditApp]
             {
                 cryEdit->OnDocumentationForums();
-            }
-        );
-    }
-
-    // AWS Support
-    {
-        AzToolsFramework::ActionProperties actionProperties;
-        actionProperties.m_name = "AWS Support";
-        actionProperties.m_category = "Help";
-
-        m_actionManagerInterface->RegisterAction(
-            EditorIdentifiers::MainWindowActionContextIdentifier, "o3de.action.help.resources.awssupport", actionProperties,
-            [cryEdit = m_cryEditApp]
-            {
-                cryEdit->OnDocumentationAWSSupport();
             }
         );
     }
@@ -1940,8 +1851,6 @@ void EditorActionsHandler::OnMenuBindingHook()
         }
         m_menuManagerInterface->AddActionToMenu(EditorIdentifiers::GameMenuIdentifier, "o3de.action.game.simulate", 200);
         m_menuManagerInterface->AddSeparatorToMenu(EditorIdentifiers::GameMenuIdentifier, 300);
-        m_menuManagerInterface->AddActionToMenu(EditorIdentifiers::GameMenuIdentifier, "o3de.action.game.exportSelectedObjects", 400);
-        m_menuManagerInterface->AddActionToMenu(EditorIdentifiers::GameMenuIdentifier, "o3de.action.game.exportOcclusionMesh", 500);
         m_menuManagerInterface->AddSeparatorToMenu(EditorIdentifiers::GameMenuIdentifier, 600);
         m_menuManagerInterface->AddActionToMenu(EditorIdentifiers::GameMenuIdentifier, "o3de.action.game.movePlayerAndCameraSeparately", 700);
         m_menuManagerInterface->AddSeparatorToMenu(EditorIdentifiers::GameMenuIdentifier, 800);
@@ -2028,7 +1937,6 @@ void EditorActionsHandler::OnMenuBindingHook()
         {
             m_menuManagerInterface->AddActionToMenu(EditorIdentifiers::HelpGameDevResourcesMenuIdentifier, "o3de.action.help.resources.gamedevblog", 100);
             m_menuManagerInterface->AddActionToMenu(EditorIdentifiers::HelpGameDevResourcesMenuIdentifier, "o3de.action.help.resources.forums", 200);
-            m_menuManagerInterface->AddActionToMenu(EditorIdentifiers::HelpGameDevResourcesMenuIdentifier, "o3de.action.help.resources.awssupport", 300);
         }
         m_menuManagerInterface->AddSeparatorToMenu(EditorIdentifiers::HelpMenuIdentifier, 500);
         m_menuManagerInterface->AddActionToMenu(EditorIdentifiers::HelpMenuIdentifier, "o3de.action.help.abouto3de", 600);
@@ -2217,14 +2125,6 @@ void EditorActionsHandler::OnStopPlayInEditor()
             actionManagerInterface->TriggerActionUpdater(EditorIdentifiers::GameModeStateChangedUpdaterIdentifier);
         }
     );
-}
-
-void EditorActionsHandler::OnEntityStreamLoadSuccess()
-{
-    if (!m_isPrefabSystemEnabled)
-    {
-        m_actionManagerInterface->TriggerActionUpdater(EditorIdentifiers::LevelLoadedUpdaterIdentifier);
-    }
 }
 
 void EditorActionsHandler::AfterEntitySelectionChanged(
@@ -2646,7 +2546,7 @@ void EditorActionsHandler::RefreshToolActions()
                 },
                 [viewpaneManager = m_qtViewPaneManager, viewpaneName = viewpane.m_name]() -> bool
                 {
-                    return viewpaneManager->IsVisible(viewpaneName);
+                    return viewpaneManager->IsEnumeratedInstanceVisible(viewpaneName);
                 }
             );
 

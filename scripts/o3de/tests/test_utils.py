@@ -8,7 +8,6 @@
 
 import pytest
 import pathlib
-import psutil
 # import subprocess
 import logging
 import unittest.mock as mock
@@ -30,6 +29,17 @@ def test_validate_identifier(value, expected_result):
     result = utils.validate_identifier(value)
     assert result == expected_result
 
+@pytest.mark.parametrize(
+    "value, expected_result", [
+        pytest.param('new', 'new_'),
+        pytest.param('default', 'default_'),
+        pytest.param('Default', 'Default'),
+        pytest.param('test-', 'test_'),
+        
+    ]
+)
+def test_sanitize_identifier_for_cpp(value, expected_result):
+    assert utils.sanitize_identifier_for_cpp(value) == expected_result
 
 @pytest.mark.parametrize(
     "value, expected_result", [
@@ -173,8 +183,6 @@ def test_load_and_execute_script(input_script_path, context_vars_dict, raisedExc
     # the successful case
     pytest.param({"args":['cmake', '--version'], "pid":0}, None),
     # these raise exceptions, but safe_kill_processes should intercept and log instead
-    pytest.param({"args":['cmake', '--version'], "pid":0}, psutil.AccessDenied),
-    pytest.param({"args":['cmake', '--version'], "pid":0}, psutil.NoSuchProcess),
     pytest.param({"args":['cmake', '--version'], "pid":0}, RuntimeError)
 ])
 def test_safe_kill_processes(process_obj, raisedException):

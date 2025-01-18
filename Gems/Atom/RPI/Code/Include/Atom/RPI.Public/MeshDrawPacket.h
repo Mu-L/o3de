@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <Atom/RPI.Public/Configuration.h>
 #include <Atom/RPI.Public/Shader/Shader.h>
 #include <Atom/RPI.Public/Material/Material.h>
 #include <Atom/RPI.Public/Model/ModelLod.h>
@@ -17,6 +18,9 @@
 #include <AzCore/Math/Obb.h>
 #include <AzCore/std/containers/fixed_vector.h>
 
+// Enable this define to print the shader variants used by MeshDrawPacket every time the draw packet get rebuilt.
+// Note: the log can be extremely long if there are too many mesh instances (for example, >5K).  
+// #define DEBUG_MESH_SHADERVARIANTS
 
 namespace AZ
 {
@@ -30,7 +34,7 @@ namespace AZ
         class Scene;
 
         //! Holds and manages an RHI DrawPacket for a specific mesh, and the resources that are needed to build and maintain it.
-        class MeshDrawPacket
+        class ATOM_RPI_PUBLIC_API MeshDrawPacket
         {
         public:
             struct ShaderData
@@ -58,7 +62,8 @@ namespace AZ
 
             bool Update(const Scene& parentScene, bool forceUpdate = false);
 
-            const RHI::DrawPacket* GetRHIDrawPacket() const;
+            RHI::DrawPacket* GetRHIDrawPacket() { return m_drawPacket.get(); }
+            const RHI::DrawPacket* GetRHIDrawPacket() const { return m_drawPacket.get(); }
             const RHI::ConstPtr<RHI::ConstantsLayout> GetRootConstantsLayout() const;
 
             void SetStencilRef(uint8_t stencilRef);
@@ -78,11 +83,13 @@ namespace AZ
             const ModelLod::Mesh& GetMesh() const;
             const ShaderList& GetActiveShaderList() const { return m_activeShaders; }
 
+            void DebugOutputShaderVariants();
+
         private:
             bool DoUpdate(const Scene& parentScene);
             void ForValidShaderOptionName(const Name& shaderOptionName, const AZStd::function<bool(const ShaderCollection::Item&, ShaderOptionIndex)>& callback);
 
-            ConstPtr<RHI::DrawPacket> m_drawPacket;
+            Ptr<RHI::DrawPacket> m_drawPacket;
 
             // Note, many of the following items are held locally in the MeshDrawPacket solely to keep them resident in memory as long as they are needed
             // for the m_drawPacket. RHI::DrawPacket uses raw pointers only, but we use smart pointers here to hold on to the data.
@@ -113,6 +120,9 @@ namespace AZ
             // Tracks whether the Material has change since the DrawPacket was last built
             Material::ChangeId m_materialChangeId = Material::DEFAULT_CHANGE_ID;
 
+            // A handler which is called when a shader variant of the material is ready 
+            Material::OnMaterialShaderVariantReadyEvent::Handler m_shaderVariantHandler;
+
             // Set the sort key for the draw packet
             RHI::DrawItemSortKey m_sortKey = 0;
 
@@ -132,6 +142,12 @@ namespace AZ
 
             //! A flag to indicate if the DrawPacket need to be rebuild when updating
             bool m_needUpdate = true;
+
+#ifdef DEBUG_MESH_SHADERVARIANTS
+            // For debug shader variants
+            // The list of shader variant asset names used by the DrawPackets
+            AZStd::vector<AZStd::string_view> m_shaderVariantNames;
+#endif
         };
         
         using MeshDrawPacketList = AZStd::vector<RPI::MeshDrawPacket>;

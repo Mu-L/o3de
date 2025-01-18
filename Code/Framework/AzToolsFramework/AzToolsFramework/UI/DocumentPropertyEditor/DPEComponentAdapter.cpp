@@ -38,27 +38,20 @@ namespace AZ::DocumentPropertyEditor
     {
         if (m_componentId == componentId)
         {
-            m_queuedRefreshLevel = AzToolsFramework::PropertyModificationRefreshLevel::Refresh_Values;
-            QTimer::singleShot(
-                0,
-                [this]()
-                {
-                    DoRefresh();
-                });
+            RequestRefresh(AzToolsFramework::PropertyModificationRefreshLevel::Refresh_Values);
         }
     }
 
     void ComponentAdapter::InvalidatePropertyDisplay(AzToolsFramework::PropertyModificationRefreshLevel level)
     {
-        if (level > m_queuedRefreshLevel)
+        RequestRefresh(level);
+    }
+
+    void ComponentAdapter::InvalidatePropertyDisplayForComponent(AZ::EntityComponentIdPair entityComponentIdPair, AzToolsFramework::PropertyModificationRefreshLevel level)
+    {
+        if ((entityComponentIdPair.GetEntityId() == m_entityId) && (entityComponentIdPair.GetComponentId() == m_componentId))
         {
-            m_queuedRefreshLevel = level;
-            QTimer::singleShot(
-                0,
-                [this]()
-                {
-                    DoRefresh();
-                });
+            RequestRefresh(level);
         }
     }
 
@@ -66,13 +59,21 @@ namespace AZ::DocumentPropertyEditor
     {
         if (level > m_queuedRefreshLevel)
         {
+            if (m_queuedRefreshLevel == AzToolsFramework::PropertyModificationRefreshLevel::Refresh_None)
+            {
+                QPointer<QObject> stillAlive(&m_stillAlive);
+                QTimer::singleShot(
+                    0,
+                    [this, stillAlive]()
+                    {
+                        // make sure the component adapter still exists by the time this refresh resolves
+                        if (stillAlive)
+                        {
+                            DoRefresh();
+                        }
+                    });
+            }
             m_queuedRefreshLevel = level;
-            QTimer::singleShot(
-                0,
-                [this]()
-                {
-                    DoRefresh();
-                });
         }
     }
 
@@ -95,7 +96,12 @@ namespace AZ::DocumentPropertyEditor
         if (m_entityId.IsValid())
         {
             const Entity* entity = AzToolsFramework::GetEntity(m_entityId);
-            AZ_Assert(entity, "ComponentAdapter::IsComponentValid - Entity is nullptr.");
+
+            // Since DoRefresh() gets called on the next tick, the entity and its components could have been destroyed by then.
+            if (entity == nullptr)
+            {
+                return false;
+            }
 
             bool isEntityActive = entity->GetState() == AZ::Entity::State::Active;
             return isEntityActive && entity->FindComponent(m_componentId) != nullptr;
@@ -106,17 +112,11 @@ namespace AZ::DocumentPropertyEditor
 
     void ComponentAdapter::DoRefresh()
     {
-        if (!IsComponentValid())
+        if (IsComponentValid())
         {
-            return;
+            m_queuedRefreshLevel = AzToolsFramework::PropertyModificationRefreshLevel::Refresh_None;
+            NotifyResetDocument();
         }
-
-        if (m_queuedRefreshLevel == AzToolsFramework::PropertyModificationRefreshLevel::Refresh_None)
-        {
-            return;
-        }
-        m_queuedRefreshLevel = AzToolsFramework::PropertyModificationRefreshLevel::Refresh_None;
-        NotifyResetDocument();
     }
 
     Dom::Value ComponentAdapter::HandleMessage(const AdapterMessage& message)
@@ -128,18 +128,18 @@ namespace AZ::DocumentPropertyEditor
             case Nodes::ValueChangeType::InProgressEdit:
                 if (m_entityId.IsValid())
                 {
-                    if (m_currentUndoNode)
+                    if (m_currentUndoBatch)
                     {
                         AzToolsFramework::ToolsApplicationRequests::Bus::BroadcastResult(
-                            m_currentUndoNode,
+                            m_currentUndoBatch,
                             &AzToolsFramework::ToolsApplicationRequests::ResumeUndoBatch,
-                            m_currentUndoNode,
+                            m_currentUndoBatch,
                             "Modify Entity Property");
                     }
                     else
                     {
                         AzToolsFramework::ToolsApplicationRequests::Bus::BroadcastResult(
-                            m_currentUndoNode, &AzToolsFramework::ToolsApplicationRequests::BeginUndoBatch, "Modify Entity Property");
+                            m_currentUndoBatch, &AzToolsFramework::ToolsApplicationRequests::BeginUndoBatch, "Modify Entity Property");
                     }
 
                     AzToolsFramework::ToolsApplicationRequests::Bus::Broadcast(
@@ -147,10 +147,10 @@ namespace AZ::DocumentPropertyEditor
                 }
                 break;
             case Nodes::ValueChangeType::FinishedEdit:
-                if (m_currentUndoNode)
+                if (m_currentUndoBatch)
                 {
                     AzToolsFramework::ToolsApplicationRequests::Bus::Broadcast(&AzToolsFramework::ToolsApplicationRequests::EndUndoBatch);
-                    m_currentUndoNode = nullptr;
+                    m_currentUndoBatch = nullptr;
                 }
                 break;
             }
@@ -168,10 +168,14 @@ namespace AZ::DocumentPropertyEditor
         ReflectionAdapter::CreateLabel(adapterBuilder, labelText, serializedPath);
     }
 
-    void ComponentAdapter::OnEntityDestroyed(const AZ::EntityId& entityId)
+    void ComponentAdapter::OnEntityDestruction(const AZ::EntityId& entityId)
     {
         if (entityId == m_entityId)
         {
+            AzToolsFramework::PropertyEditorGUIMessages::Bus::Handler::BusDisconnect();
+            AzToolsFramework::ToolsApplicationEvents::Bus::Handler::BusDisconnect();
+            AzToolsFramework::PropertyEditorEntityChangeNotificationBus::MultiHandler::BusDisconnect(m_entityId);
+            
             m_entityId.SetInvalid();
             AZ::EntitySystemBus::Handler::BusDisconnect();
         }

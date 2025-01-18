@@ -15,6 +15,7 @@
 
 #include <AzCore/Component/Component.h>
 #include <AzCore/Component/TickBus.h>
+#include <AzCore/IO/ByteContainerStream.h>
 #include <AzFramework/Entity/GameEntityContextBus.h>
 #include <AzFramework/Process/ProcessWatcher.h>
 #include <AzFramework/Process/ProcessCommunicatorTracePrinter.h>
@@ -22,7 +23,6 @@
 #include <AzToolsFramework/ActionManager/ActionManagerRegistrationNotificationBus.h>
 #include <AzToolsFramework/Entity/EditorEntityContextBus.h>
 #include <AzToolsFramework/Prefab/Spawnable/PrefabToInMemorySpawnableNotificationBus.h>
-#include <AzToolsFramework/Editor/EditorContextMenuBus.h>
 
 namespace AzNetworking
 {
@@ -54,7 +54,6 @@ namespace Multiplayer
         , private AZ::TickBus::Handler
         , private AzToolsFramework::Prefab::PrefabToInMemorySpawnableNotificationBus::Handler
         , private AzToolsFramework::EditorEntityContextNotificationBus::Handler
-        , private AzToolsFramework::EditorContextMenuBus::Handler
         , private AzToolsFramework::ActionManagerRegistrationNotificationBus::Handler
     {
     public:
@@ -100,12 +99,6 @@ namespace Multiplayer
         void OnStopPlayInEditorBegin() override;
         //! @}
 
-        //! AzToolsFramework::EditorContextMenu::Bus::Handler overrides
-        //! @{
-        void PopulateEditorGlobalContextMenu(QMenu* menu, const AZStd::optional<AzFramework::ScreenPoint>& point, int flags) override;
-        int GetMenuPosition() const override;
-        //! @}
-
         // AzToolsFramework::ActionManagerRegistrationNotificationBus overrides ...
         void OnActionRegistrationHook() override;
         void OnMenuBindingHook() override;
@@ -133,6 +126,9 @@ namespace Multiplayer
         //! Context menu handler
         void ContextMenu_NewMultiplayerEntity(AZ::EntityId parentEntityId, const AZ::Vector3& worldPosition);
 
+        void ResetLevelSendData();
+        void SendLevelDataToServer();
+
         IEditor* m_editor = nullptr;
         AZStd::unique_ptr<AzFramework::ProcessWatcher> m_serverProcessWatcher = nullptr;
         AZStd::unique_ptr<ProcessCommunicatorTracePrinter> m_serverProcessTracePrinter = nullptr;
@@ -148,7 +144,17 @@ namespace Multiplayer
             AZStd::string assetHint;
             AZ::Data::AssetId assetId;
         };
-        
+
         AZStd::vector<PreAliasedSpawnableData> m_preAliasedSpawnablesForServer;
+
+        // Structure that encapsulates the data we need for sending the level data to the server when entering game mode.
+        struct LevelSendData
+        {
+            AZStd::vector<uint8_t> m_sendBuffer;
+            AZStd::unique_ptr<AZ::IO::ByteContainerStream<AZStd::vector<uint8_t>>> m_byteStream;
+            AzNetworking::IConnection* m_sendConnection = nullptr;
+        };
+
+        LevelSendData m_levelSendData;
     };
 }

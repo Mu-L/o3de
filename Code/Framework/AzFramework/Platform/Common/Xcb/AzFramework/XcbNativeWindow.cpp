@@ -48,7 +48,7 @@ namespace AzFramework
     }
 
     ////////////////////////////////////////////////////////////////////////////////////////////////
-    void XcbNativeWindow::InitWindow(const AZStd::string& title, const WindowGeometry& geometry, const WindowStyleMasks& styleMasks)
+    void XcbNativeWindow::InitWindowInternal(const AZStd::string& title, const WindowGeometry& geometry, const WindowStyleMasks& styleMasks)
     {
         // Get the parent window
         const xcb_setup_t* xcbSetup = xcb_get_setup(m_xcbConnection);

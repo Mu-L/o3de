@@ -37,9 +37,6 @@ namespace UnitTest
     {
     public:
         PrefabTestToolsApplication(AZStd::string appName);
-
-        // Make sure our prefab tests always run with prefabs enabled
-        bool IsPrefabSystemEnabled() const override;
     };
 
     //! Defines prefab testing environment.
@@ -156,10 +153,6 @@ namespace UnitTest
         void CreateEditorRepresentation(AZ::Entity* entity) override;
         void BrowseForAssets([[maybe_unused]] AzToolsFramework::AssetBrowser::AssetSelectionModel& selection) override
         {
-        }
-        int GetIconTextureIdFromEntityIconPath([[maybe_unused]] const AZStd::string& entityIconPath) override
-        {
-            return 0;
         }
         //! @}
 

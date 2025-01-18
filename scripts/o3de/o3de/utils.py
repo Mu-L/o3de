@@ -12,23 +12,24 @@ import argparse
 import importlib.util
 import logging
 import os
+import stat
 import pathlib
-import psutil
 import re
 import shutil
-import subprocess
+import string
 import sys
 import urllib.request
+from urllib.parse import ParseResult
 import uuid
 import zipfile
-from packaging.version import Version
 from packaging.specifiers import SpecifierSet
 
-from o3de import gitproviderinterface, github_utils, validation as valid
-from subprocess import Popen, PIPE
+from o3de import github_utils, git_utils, validation as valid
+from subprocess import Popen, PIPE, STDOUT
 from typing import List, Tuple
 
 LOG_FORMAT = '[%(levelname)s] %(name)s: %(message)s'
+UI_MSG_FORMAT = '%(message)s'
 
 logger = logging.getLogger('o3de.utils')
 logging.basicConfig(format=LOG_FORMAT)
@@ -111,20 +112,19 @@ class CLICommand(object):
             line = process.stdout.readline()
             if not line: break
 
-            log_line = line.decode('utf-8', 'ignore')
+            log_line = line.decode('utf-8', 'ignore').rstrip()
             self._stdout_lines.append(log_line)
             self.logger.info(log_line)
     
-    def _cleanup_process(self, process) -> str:
+    def _cleanup_process(self, process) -> None:
         # flush remaining log lines
         log_lines = process.stdout.read().decode('utf-8', 'ignore')
         self._stdout_lines += log_lines.split('\n')
         self.logger.info(log_lines)
-        stderr = process.stderr.read()
 
         safe_kill_processes(process, process_logger = self.logger)
 
-        return stderr
+
     
     def run(self) -> int:
         """
@@ -134,25 +134,20 @@ class CLICommand(object):
         """
         ret = 1
         try:
-            with Popen(self.args, cwd=self.cwd, env=self.env, stdout=PIPE, stderr=PIPE) as process:
+            with Popen(self.args, cwd=self.cwd, env=self.env, stdout=PIPE, stderr=STDOUT) as process:
                 self.logger.info(f"Running process '{self.args[0]}' with PID({process.pid}): {self.args}")
                 
                 self._poll_process(process)
-                stderr = self._cleanup_process(process)
+
+                self._cleanup_process(process)
 
                 ret = process.returncode
 
-                # print out errors if there are any      
-                if stderr:
-                    # bool(ret) --> if the process returns a FAILURE code (>0)
-                    logger_func = self.logger.error if bool(ret) else self.logger.warning
-                    err_txt = stderr.decode('utf-8', 'ignore')
-                    logger_func(err_txt)
-                    self._stderr_lines = err_txt.split("\n")
+                return ret
+
         except Exception as err:
             self.logger.error(err)
             raise err
-        return ret
 
 
 # Per Python documentation, only strings should be inserted into sys.path
@@ -230,6 +225,22 @@ def copyfileobj(fsrc, fdst, callback, length=0):
             return 1
     return 0
 
+def remove_dir_path(path:pathlib.Path):
+    """
+    Helper function to delete a folder, ignoring all errors if possible
+    :param path: The Path to the folder to delete
+    """
+    if path.exists() and path.is_dir():
+        files_to_delete = []
+        for root, dirs, files in os.walk(path):
+            for file in files:
+                files_to_delete.append(os.path.join(root, file))
+        for file in files_to_delete:
+            os.chmod(file, stat.S_IWRITE)
+            os.remove(file)
+
+        shutil.rmtree(path.resolve(), ignore_errors=True)
+
 
 def validate_identifier(identifier: str) -> bool:
     """
@@ -277,15 +288,31 @@ def sanitize_identifier_for_cpp(identifier: str) -> str:
     :param identifier: the name which needs to be sanitized
     :return: str: sanitized identifier
     """
+    cpp_keywords = [
+        'alignas', 'constinit', 'false', 'public', 'true', 'alignof', 'const_cast', 'float', 'register',
+        'try', 'asm', 'continue', 'for', 'reinterpret_cast', 'typedef', 'auto', 'co_await', 'friend',
+        'requires', 'typeid', 'bool', 'co_return', 'goto', 'return', 'typename', 'break', 'co_yield',
+        'if', 'short', 'union', 'case', 'decltype', 'inline', 'signed', 'unsigned', 'catch', 'default',
+        'int', 'sizeof', 'using', 'char', 'delete', 'long', 'static', 'virtual', 'char8_t', 'do', 'mutable',
+        'static_assert', 'void', 'char16_t', 'double', 'namespace', 'static_cast', 'volatile', 'char32_t',
+        'dynamic_cast', 'new', 'struct', 'wchar_t', 'class', 'else', 'noexcept', 'switch', 'while', 'concept',
+        'enum', 'nullptr', 'template', 'const', 'explicit', 'operator', 'this', 'consteval', 'export', 'private',
+        'thread_local', 'constexpr', 'extern', 'protected', 'throw', 'and', 'and_eq', 'bitand', 'bitor', 'compl',
+        'not', 'not_eq', 'or', 'or_eq', 'xor', 'xor_eq']
+    
     if not identifier:
         return ''
     
-    sanitized_identifier = list(identifier)
-    for index, character in enumerate(sanitized_identifier):
+    identifier_chars = list(identifier)
+    for index, character in enumerate(identifier_chars):
         if not (character.isalnum() or character == '_'):
-            sanitized_identifier[index] = '_'
+            identifier_chars[index] = '_'
             
-    return "".join(sanitized_identifier)
+    sanitized_identifier = "".join(identifier_chars)
+    if sanitized_identifier in cpp_keywords:
+        sanitized_identifier += '_'
+            
+    return sanitized_identifier
 
 
 def validate_uuid4(uuid_string: str) -> bool:
@@ -327,16 +354,23 @@ def backup_folder(folder: str or pathlib.Path) -> None:
                 renamed = True
 
 
-def get_git_provider(parsed_uri):
+def get_git_provider(parsed_uri: ParseResult):
     """
     Returns a git provider if one exists given the passed uri
     :param parsed_uri: uniform resource identifier of a possible git repository
     :return: A git provider implementation providing functions to get infomration about or clone a repository, see gitproviderinterface
     """
-    return github_utils.get_github_provider(parsed_uri)
+    # check for providers with unique APIs first
+    git_provider = github_utils.get_github_provider(parsed_uri)
+
+    if not git_provider:
+        # fallback to generic git provider
+        git_provider = git_utils.get_generic_git_provider(parsed_uri)
+
+    return git_provider
 
 
-def download_file(parsed_uri, download_path: pathlib.Path, force_overwrite: bool = False, object_name: str = "", download_progress_callback = None) -> int:
+def download_file(parsed_uri: ParseResult, download_path: pathlib.Path, force_overwrite: bool = False, object_name: str = "", download_progress_callback = None) -> int:
     """
     Download file
     :param parsed_uri: uniform resource identifier to zip file to download
@@ -345,34 +379,21 @@ def download_file(parsed_uri, download_path: pathlib.Path, force_overwrite: bool
     :param object_name: name of the object being downloaded
     :param download_progress_callback: callback called with the download progress as a percentage, returns true to request to cancel the download
     """
-    file_exists = False
-    if download_path.is_file():
-        if not force_overwrite:
-            file_exists = True
-        else:
-            try:
-                os.unlink(download_path)
-            except OSError:
-                logger.error(f'Could not remove existing download path {download_path}.')
-                return 1
+    file_exists = download_path.is_file()
 
     if parsed_uri.scheme in ['http', 'https', 'ftp', 'ftps']:
         try:
             current_request = urllib.request.Request(parsed_uri.geturl())
             resume_position = 0
-            if not force_overwrite:
-                if file_exists:
-                    resume_position = os.path.getsize(download_path)
-                    current_request.add_header("If-Range", "bytes=%d-" % resume_position)
+            if file_exists and not force_overwrite:
+                resume_position = os.path.getsize(download_path)
+                current_request.add_header("If-Range", "bytes=%d-" % resume_position)
+
             with urllib.request.urlopen(current_request) as s:
-                download_file_size = 0
-                try:
-                    download_file_size = s.headers['content-length']
-                except KeyError:
-                    pass
+                download_file_size = int(s.headers.get('content-length',0))
 
                 # if the server does not return a content length we also have to assume we would be replacing a complete file
-                if file_exists and (resume_position == int(download_file_size) or int(download_file_size) == 0) and not force_overwrite:
+                if file_exists and (resume_position == download_file_size or download_file_size == 0) and not force_overwrite:
                     logger.error(f'File already downloaded to {download_path} and force_overwrite is not set.')
                     return 1
 
@@ -383,22 +404,30 @@ def download_file(parsed_uri, download_path: pathlib.Path, force_overwrite: bool
                 else:
                     logger.error(f'HTTP status {e.code} opening {parsed_uri.geturl()}')
                     return 1
+                
+                # remove the file only after we have a response from the server and something to replace it with
+                if file_exists and force_overwrite:
+                    try:
+                        os.unlink(download_path)
+                    except OSError:
+                        logger.error(f'Could not remove existing download path {download_path}.')
+                        return 1
 
                 def print_progress(downloaded, total_size):
                     end_ch = '\r'
                     if total_size == 0 or downloaded > total_size:
-                        print(f'Downloading {object_name} - {downloaded} bytes')
+                        print(f'Downloading {object_name if object_name else parsed_uri.geturl()} - {downloaded} bytes')
                     else:
                         if downloaded == total_size:
                             end_ch = '\n'
-                        print(f'Downloading {object_name} - {downloaded} of {total_size} bytes - {(downloaded/total_size)*100:.2f}%', end=end_ch)
+                        print(f'Downloading {object_name if object_name else parsed_uri.geturl()} - {downloaded} of {total_size} bytes - {(downloaded/total_size)*100:.2f}%', end=end_ch)
 
                 if download_progress_callback == None:
                     download_progress_callback = print_progress
 
                 def download_progress(downloaded_bytes):
                     if download_progress_callback:
-                        return download_progress_callback(int(downloaded_bytes), int(download_file_size))
+                        return download_progress_callback(int(downloaded_bytes), download_file_size)
                     return False
 
                 with download_path.open(file_mode) as f:
@@ -413,8 +442,17 @@ def download_file(parsed_uri, download_path: pathlib.Path, force_overwrite: bool
             logger.error(f'URL Error {e.reason} opening {parsed_uri.geturl()}')
             return 1
     else:
-        origin_file = pathlib.Path(parsed_uri.geturl()).resolve()
+        parsed_uri_path = urllib.parse.unquote(parsed_uri.path)
+        if isinstance(download_path, pathlib.PureWindowsPath):
+            # On Windows we want to remove the initial slash in front of the drive letter
+            if parsed_uri_path.startswith('/'):
+                parsed_uri_path = parsed_uri_path[1:]
+            else:
+                logger.warning(f"The provided path URI '{parsed_uri_path}' may be missing a '/', "
+                               "file URIs typically have 3 slashes when they have an empty authority (RFC 8089) e.g. file:///")
+        origin_file = pathlib.Path(parsed_uri_path).resolve()
         if not origin_file.is_file():
+            logger.error(f"Failed to find local file '{origin_file}' based on URI '{parsed_uri}'")
             return 1
         shutil.copy(origin_file, download_path)
 
@@ -518,6 +556,29 @@ def get_gem_names_set(gems: list, include_optional:bool = True) -> set:
             return not gem.get('optional', False)
 
     return set([gem['name'] if isinstance(gem, dict) else gem for gem in gems if should_include_gem(gem)])
+
+
+def add_or_replace_object_names(object_names:set, new_object_names:list) -> list:
+    """
+    Returns a list of object names with optional version specifiers, where all objects in
+    the object_names list are replaced with objects in the new_object_names list.  Any object_names, that 
+    don't exist in object_names are added to the new list
+    NOTE: this function only accepts lists of strings, it does not work with lists that contain dicts
+    :param object_names: The set of object names with optional version specifiers
+    :param new_object_names: The object names with optional version specifiers to add or replace in object_names 
+    :return: the combined list of object_names modified with new_object_names 
+    """
+    object_name_map = {}
+    for object_name_with_specifier in object_names:
+        object_name, _ = get_object_name_and_optional_version_specifier(object_name_with_specifier)
+        object_name_map[object_name] = object_name_with_specifier
+    
+    # overwrite or add objects from new_object_names
+    for object_name_with_specifier in new_object_names:
+        object_name, _ = get_object_name_and_optional_version_specifier(object_name_with_specifier)
+        object_name_map[object_name] = object_name_with_specifier
+
+    return object_name_map.values()
 
 
 def contains_object_name(object_name:str, candidates:list) -> bool:
@@ -717,10 +778,8 @@ def safe_kill_processes(*processes: List[Popen], process_logger: logging.Logger 
     def on_terminate(proc) -> None:
         try:
             process_logger.info(f"process '{proc.args[0]}' with PID({proc.pid}) terminated with exit code {proc.returncode}")
-        except psutil.AccessDenied:
-            process_logger.warning("Termination failed, Access Denied with stacktrace:", exc_info=True)
-        except psutil.NoSuchProcess:
-            process_logger.warning("Termination request ignored, process was already terminated during iteration with stacktrace:", exc_info=True)
+        except Exception:  # purposefully broad
+            process_logger.error("Exception encountered with termination request, with stacktrace:", exc_info=True)
 
     if not process_logger:
         process_logger = logger
@@ -729,18 +788,56 @@ def safe_kill_processes(*processes: List[Popen], process_logger: logging.Logger 
         try:
             process_logger.info(f"Terminating process '{proc.args[0]}' with PID({proc.pid})")
             proc.kill()
-        except psutil.AccessDenied:
-            process_logger.warning("Termination failed, Access Denied with stacktrace:", exc_info=True)
-        except psutil.NoSuchProcess:
-            process_logger.warning("Termination request ignored, process was already terminated during iteration with stacktrace:", exc_info=True)
         except Exception:  # purposefully broad
             process_logger.error("Unexpected exception ignored while terminating process, with stacktrace:", exc_info=True)
     try:
-        psutil.wait_procs(processes, timeout=30, callback=on_terminate)
-    except psutil.AccessDenied:
-        process_logger.warning("Termination failed, Access Denied with stacktrace:", exc_info=True)
-    except psutil.NoSuchProcess:
-        process_logger.warning("Termination request ignored, process was already terminated during iteration with stacktrace:", exc_info=True)
+        for proc in processes:
+            proc.wait(timeout=30)
+            on_terminate(proc)
     except Exception:  # purposefully broad
         process_logger.error("Unexpected exception while waiting for processes to terminate, with stacktrace:", exc_info=True)
 
+
+def load_template_file(template_file_path: pathlib.Path, template_env: dict, read_encoding:str = 'UTF-8', encoding_error_action:str='ignore') -> str:
+    """
+    Helper method to load in a template file and return the processed template based on the input template environment
+    This will also handle '###' tokens to strip out of the final output completely to support things like adding
+    copyrights to the template that is not intended for the output text
+
+    :param template_file_path:  The path to the template file to load
+    :param template_env:        The template environment dictionary for the template file to process
+    :param read_encoding:       The text encoding to use to read from the file
+    :param  encoding_error_action:  The action to take on encoding errors
+    :return:    The processed content from the template file
+    :raises:    FileNotFoundError: If the template file path cannot be found
+    """
+    try:
+        template_file_content = template_file_path.resolve(strict=True).read_text(encoding=read_encoding,
+                                                                                  errors=encoding_error_action)
+        # Filter out all lines that start with '###' before replacement
+        filtered_template_file_content = (str(re.sub('###.*', '', template_file_content)).strip())
+
+        return string.Template(filtered_template_file_content).substitute(template_env)
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Invalid file path. Cannot find template file located at {str(template_file_path)}")
+
+
+def remove_link(link:pathlib.PurePath):
+    """
+    Helper function to either remove a symlink, or remove a folder
+    """
+    link = pathlib.PurePath(link)
+    if os.path.isdir(link):
+        try:
+            os.unlink(link)
+        except OSError:
+            # If unlink fails use shutil.rmtree
+            def remove_readonly(func, path, _):
+                # Clear the readonly bit and reattempt the removal
+                os.chmod(path, stat.S_IWRITE)
+                func(path)
+
+            try:
+                shutil.rmtree(link, onerror=remove_readonly)
+            except shutil.Error as shutil_error:
+                raise RuntimeError(f'Error trying remove directory {link}: {shutil_error}', shutil_error.errno)

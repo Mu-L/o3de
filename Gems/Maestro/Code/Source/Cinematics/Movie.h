@@ -50,6 +50,7 @@ public:
 
     CMovieSystem(ISystem* system);
     CMovieSystem();
+    ~CMovieSystem();
 
     void Release() override { delete this; };
 
@@ -123,8 +124,6 @@ public:
 
     void SetRecording(bool recording) override { m_bRecording = recording; };
     bool IsRecording() const override { return m_bRecording; };
-
-    void EnableCameraShake(bool bEnabled) override{ m_bEnableCameraShake = bEnabled; };
 
     void SetCallback(IMovieCallback* pCallback) override { m_pCallback = pCallback; }
     IMovieCallback* GetCallback() override { return m_pCallback; }
@@ -229,7 +228,6 @@ private:
     bool    m_bRecording;
     bool    m_bPaused;
     bool    m_bCutscenesPausedInEditor;
-    bool    m_bEnableCameraShake;
 
     SCameraParams m_ActiveCameraParams;
 

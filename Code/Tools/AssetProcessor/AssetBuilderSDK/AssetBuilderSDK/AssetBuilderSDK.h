@@ -109,7 +109,7 @@ namespace AssetBuilderSDK
     namespace ComponentTags
     {
         //! Components with the AssetBuilder tag in their reflect data's attributes as AZ::Edit::Attributes::SystemComponetTags will automatically be created on AssetBuilder startup
-        const static AZ::Crc32 AssetBuilder = AZ_CRC("AssetBuilder", 0xc739c7d7);
+        const static AZ::Crc32 AssetBuilder = AZ_CRC_CE("AssetBuilder");
     }
 
     extern const char* const ErrorWindow; //Use this window name to log error messages.
@@ -373,8 +373,12 @@ namespace AssetBuilderSDK
 
         //! This is similiar to Order where the dependent job should only run after all the jobs it depends on are processed by the Asset Processor.
         //! The difference is that here only those dependent jobs matter that have never been processed by the Asset Processor.
-        //! Also important to note is the fingerprint of the dependent jobs will not alter the the fingerprint of the job.
+        //! Also important to note is the fingerprint of the dependent jobs will not alter the fingerprint of the job.
         OrderOnce,
+
+        //! Similar to Order, except that the dependent jobs do not rebuild when the jobs they depend on are processed.
+        //! Also important to note is the fingerprint of the dependent jobs will not alter the fingerprint of the job.
+        OrderOnly,
     };
 
     //! Job dependency information that the builder will send to the Asset Processor.

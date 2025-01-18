@@ -32,8 +32,6 @@
 #include <algorithm>
 #include <QScopedValueRollback>
 
-#include <AzFramework/API/ApplicationAPI.h>
-
 #include <AzAssetBrowser/AzAssetBrowserWindow.h>
 #include <AzToolsFramework/UI/UICore/WidgetHelpers.h>
 #include <AzQtComponents/Utilities/AutoSettingsGroup.h>
@@ -46,8 +44,7 @@
 #include <AzQtComponents/Utilities/QtViewPaneEffects.h>
 #include <AzQtComponents/Components/StyleManager.h>
 #include <AzCore/UserSettings/UserSettingsComponent.h>
-
-#include "ShortcutDispatcher.h"
+#include <IXml.h>
 
 // Helper for EditorComponentModeNotifications to be used
 // as a member instead of inheriting from EBus directly.
@@ -935,21 +932,22 @@ void QtViewPaneManager::CloseAllNonStandardPanes()
 
 void QtViewPaneManager::TogglePane(const QString& name)
 {
-    QtViewPane* pane = GetPane(name);
-    if (!pane)
+    // Find the first pane with this name, or an enumerated instance.
+    QtViewPane* pane = GetFirstVisiblePaneMatching(name);
+    if (pane)
     {
-        Q_ASSERT(false);
+        ClosePane(pane->m_name);
         return;
     }
 
-    if (pane->IsVisible())
+    pane = GetPane(name);
+    if (!pane)
     {
-        ClosePane(name);
+        Q_ASSERT_X(false, "QtViewPaneManager", ("Failed to open pane " + name).toUtf8().data());
+        return;
     }
-    else
-    {
-        OpenPane(name);
-    }
+
+    OpenPane(name);
 }
 
 QWidget* QtViewPaneManager::CreateWidget(const QString& paneName)
@@ -1043,11 +1041,6 @@ bool QtViewPaneManager::ClosePanesWithRollback(const QVector<QString>& panesToKe
  */
 void QtViewPaneManager::RestoreDefaultLayout(bool resetSettings)
 {
-    // Get whether the prefab system is enabled
-    bool isPrefabSystemEnabled = false;
-    AzFramework::ApplicationRequests::Bus::BroadcastResult(
-        isPrefabSystemEnabled, &AzFramework::ApplicationRequests::IsPrefabSystemEnabled);
-
     if (resetSettings)
     {
         // We're going to do something destructive (removing all of the viewpane settings). Better confirm with the user
@@ -1084,14 +1077,9 @@ void QtViewPaneManager::RestoreDefaultLayout(bool resetSettings)
         ViewLayoutState state;
 
         state.viewPanes.push_back(LyViewPane::EntityOutliner);
-        state.viewPanes.push_back(LyViewPane::EntityInspector);
+        state.viewPanes.push_back(LyViewPane::Inspector);
         state.viewPanes.push_back(LyViewPane::AssetBrowser);
         state.viewPanes.push_back(LyViewPane::Console);
-
-        if (!isPrefabSystemEnabled)
-        {
-            state.viewPanes.push_back(LyViewPane::LevelInspector);
-        }
 
         state.mainWindowState = m_defaultMainWindowState;
 
@@ -1114,15 +1102,10 @@ void QtViewPaneManager::RestoreDefaultLayout(bool resetSettings)
     // Reset the default view panes to be opened. Used for restoring default layout and component entity layout.
     const QtViewPane* entityOutlinerViewPane = OpenPane(LyViewPane::EntityOutliner, QtViewPane::OpenMode::UseDefaultState);
     const QtViewPane* assetBrowserViewPane = OpenPane(LyViewPane::AssetBrowser, QtViewPane::OpenMode::UseDefaultState);
-    const QtViewPane* assetBrowserInspectorPane = OpenPane(LyViewPane::AssetBrowserInspector, QtViewPane::OpenMode::UseDefaultState);
-    const QtViewPane* entityInspectorViewPane = OpenPane(LyViewPane::EntityInspector, QtViewPane::OpenMode::UseDefaultState);
+    const QtViewPane* InspectorViewPane = OpenPane(LyViewPane::Inspector, QtViewPane::OpenMode::UseDefaultState);
     const QtViewPane* consoleViewPane = OpenPane(LyViewPane::Console, QtViewPane::OpenMode::UseDefaultState);
 
     const QtViewPane* levelInspectorPane = nullptr;
-    if (!isPrefabSystemEnabled)
-    {
-        levelInspectorPane = OpenPane(LyViewPane::LevelInspector, QtViewPane::OpenMode::UseDefaultState);
-    }
 
     // This class does all kinds of behind the scenes magic to make docking / restore work, especially with groups
     // so instead of doing our special default layout attach / docking right now, we want to make it happen
@@ -1168,21 +1151,10 @@ void QtViewPaneManager::RestoreDefaultLayout(bool resetSettings)
             }
         }
 
-        if (assetBrowserInspectorPane)
+        if (InspectorViewPane)
         {
-            m_mainWindow->addDockWidget(Qt::BottomDockWidgetArea, assetBrowserInspectorPane->m_dockWidget);
-            assetBrowserInspectorPane->m_dockWidget->setFloating(false);
-
-            static const float assetBrowserInspectorWidthPercentage = 0.15f;
-            int newWidth = static_cast<int>((float)screenWidth * assetBrowserInspectorWidthPercentage);
-
-            m_mainWindow->resizeDocks({ assetBrowserInspectorPane->m_dockWidget }, { newWidth }, Qt::Horizontal);
-        }
-
-        if (entityInspectorViewPane)
-        {
-            m_mainWindow->addDockWidget(Qt::RightDockWidgetArea, entityInspectorViewPane->m_dockWidget);
-            entityInspectorViewPane->m_dockWidget->setFloating(false);
+            m_mainWindow->addDockWidget(Qt::RightDockWidgetArea, InspectorViewPane->m_dockWidget);
+            InspectorViewPane->m_dockWidget->setFloating(false);
 
             static const float tabWidgetWidthPercentage = 0.2f;
             int newWidth = static_cast<int>((float)screenWidth * tabWidgetWidthPercentage);
@@ -1192,11 +1164,11 @@ void QtViewPaneManager::RestoreDefaultLayout(bool resetSettings)
                 // Tab the entity inspector with the level Inspector so that when they are
                 // tabbed they will be given the default width, and move the entity inspector
                 // to be the first tab on the left and active
-                AzQtComponents::DockTabWidget* tabWidget = m_advancedDockManager->tabifyDockWidget(levelInspectorPane->m_dockWidget, entityInspectorViewPane->m_dockWidget, m_mainWindow);
+                AzQtComponents::DockTabWidget* tabWidget = m_advancedDockManager->tabifyDockWidget(levelInspectorPane->m_dockWidget, InspectorViewPane->m_dockWidget, m_mainWindow);
                 if (tabWidget)
                 {
                     tabWidget->moveTab(1, 0);
-                    tabWidget->setCurrentWidget(entityInspectorViewPane->m_dockWidget);
+                    tabWidget->setCurrentWidget(InspectorViewPane->m_dockWidget);
 
                     QDockWidget* tabWidgetParent = qobject_cast<QDockWidget*>(tabWidget->parentWidget());
                     m_mainWindow->resizeDocks({ tabWidgetParent }, { newWidth }, Qt::Horizontal);
@@ -1204,7 +1176,7 @@ void QtViewPaneManager::RestoreDefaultLayout(bool resetSettings)
             }
             else
             {
-                m_mainWindow->resizeDocks({ entityInspectorViewPane->m_dockWidget }, { newWidth }, Qt::Horizontal);
+                m_mainWindow->resizeDocks({ InspectorViewPane->m_dockWidget }, { newWidth }, Qt::Horizontal);
             }
         }
 
@@ -1422,13 +1394,13 @@ bool QtViewPaneManager::RestoreLayout(QString layoutName)
     static const QString userLegacyLayout = "User Legacy Layout";
     if (layoutName == s_lastLayoutName && !HasLayout(userLegacyLayout))
     {
-        bool layoutHasEntityInspector = false;
+        bool layoutHasInspector = false;
         bool layoutHasEntityOutliner = false;
         for (const QString& paneName : state.viewPanes)
         {
-            if (paneName == LyViewPane::EntityInspector)
+            if (paneName == LyViewPane::Inspector)
             {
-                layoutHasEntityInspector = true;
+                layoutHasInspector = true;
             }
             else if (paneName == LyViewPane::EntityOutliner)
             {
@@ -1436,7 +1408,7 @@ bool QtViewPaneManager::RestoreLayout(QString layoutName)
             }
         }
 
-        if (!layoutHasEntityInspector || !layoutHasEntityOutliner)
+        if (!layoutHasInspector || !layoutHasEntityOutliner)
         {
             SaveStateToLayout(state, userLegacyLayout);
 
@@ -1658,6 +1630,39 @@ QtViewPane* QtViewPaneManager::GetPane(const QString& name)
     return foundPane;
 }
 
+QtViewPane* QtViewPaneManager::GetFirstVisiblePaneMatching(const QString& name)
+{
+    QString baseName = name;
+
+    // Strip away any enumeration.
+    baseName = baseName.remove(QRegExp("\\([0-9]+\\)$"));
+
+    // Build a regexp which will match just the name, or the name followed by a number in parentheses.
+    QRegExp pattern(name + "([ ]*\\([0-9]+\\))*");
+
+    auto it = std::find_if(m_registeredPanes.begin(), m_registeredPanes.end(),
+            [pattern](const QtViewPane& pane)
+        {
+            return pattern.exactMatch(pane.m_name) && pane.IsVisible();
+        });
+
+    QtViewPane* foundPane = ((it == m_registeredPanes.end()) ? nullptr : it);
+
+    if (foundPane == nullptr)
+    {
+        // if we couldn't find the pane based on the name (which will be the title), look it up by saveKeyName next
+        auto optionsIt = std::find_if(m_registeredPanes.begin(), m_registeredPanes.end(),
+            [pattern](const QtViewPane& pane)
+        {
+            return pattern.exactMatch(pane.m_options.saveKeyName) && pane.IsVisible();
+        });
+
+        foundPane = ((optionsIt == m_registeredPanes.end()) ? nullptr : optionsIt);
+    }
+
+    return foundPane;
+}
+
 QtViewPane* QtViewPaneManager::GetViewportPane(int viewportType)
 {
     auto it = std::find_if(m_registeredPanes.begin(), m_registeredPanes.end(),
@@ -1676,6 +1681,12 @@ bool QtViewPaneManager::IsVisible(const QString& name)
 {
     QtViewPane* view = GetPane(name);
     return view && view->IsVisible();
+}
+
+bool QtViewPaneManager::IsEnumeratedInstanceVisible(const QString& name)
+{
+    // Returns true is panel "name" is visible or "name (1)" etc.
+    return GetFirstVisiblePaneMatching(name);
 }
 
 bool QtViewPaneManager::IsPaneRegistered(const QString& name) const
